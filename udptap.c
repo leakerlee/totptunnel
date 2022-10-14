@@ -1,34 +1,3 @@
-/* udptap - multiplex packets between a tap device and a udp socket
-
-   Copyright (c) 2003, Hans Rosenfeld
-   Added mcrypt encryption - Vitaly "_Vi" Shukela; 2012
-Note: mcrypt is GPLv3+
-
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of this software and associated documentation files (the "Software"),
-to deal in the Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, sublicense,
-and/or sell copies of the Software, and to permit persons to whom the
-Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
-HANS ROSENFELD BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-Except as contained in this notice, the name of Hans Rosenfeld shall not
-be used in advertising or otherwise to promote the sale, use or other dealings
-in this Software without prior written authorization from Hans Rosenfeld.
-
-(This Copyright notice / Disclaimer was copied from SIMH (c) Robert M Supnik)
-
-*/
-
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -52,9 +21,253 @@ in this Software without prior written authorization from Hans Rosenfeld.
 
 #include <sys/select.h>
 
+#include <time.h>
 #include <mcrypt.h>
-
 #include <cotp.h>
+#include <sys/random.h>
+
+#include <baseencode.h>
+
+#define MAX_DATA_LEN 1526
+
+#pragma pack(push, 1)
+typedef struct stPacket
+{
+    unsigned int uiRand;
+    unsigned int uiCRC32;
+    unsigned short usLen;
+    unsigned char ucBuf[MAX_DATA_LEN];
+} Packet, *PPacket;
+#pragma pack(pop)
+
+typedef enum _crypt_error
+{
+    CRYPT_SUCCESS = 0,
+    CRYPT_INVALID_TOTP_COUNT = 1,
+    CRYPT_DECRYPT_FAILED = 2,
+    CRYPT_KEYSIZE_INVALID = 3,
+    CRYPT_RANDOM_FAILED = 4,
+    CRYPT_ENCRYPT_FAILED = 5,
+    CRYPT_BLK_NOTFIT = 6,
+    CRYPT_TOTP_FAILED = 7,
+} crypt_error_t;
+
+crypt_error_t encryptDataTOTP(MCRYPT td, unsigned char ucPasswd[24], unsigned char *lpucBuf, unsigned int *lpuiBufLen, time_t now, unsigned int uiPeriod)
+{
+    printf("**********************************************************\n");
+    int iRes = 0;
+    const char *K = "this is a secret";
+    cotp_error_t err;
+    baseencode_error_t base_err;
+    char *secret_base32 = base32_encode((unsigned char *)K, strlen(K) + 1, &base_err);
+    unsigned char ucPasswdBuf[32] = {0};
+    int iKeysize = 0;
+    int iBlocksize = 0;
+    int iCnt;
+    char *lpszTOTP;
+
+    printf("*lpuiBufLen: %d\n", *lpuiBufLen);
+    iBlocksize = mcrypt_enc_get_block_size(td);
+    iCnt = ((*lpuiBufLen - 1) / iBlocksize + 1) * iBlocksize;  // pad to block size
+    printf("encryptDataTOTP iCnt: %d\n", iCnt);
+    if (iCnt > sizeof(Packet))
+    {
+        free(secret_base32);
+        return CRYPT_BLK_NOTFIT;
+    }
+
+    printf("encryptDataTOTP checkpoint 1\n");
+    lpszTOTP = get_totp_at(secret_base32, now, 8, uiPeriod, SHA1, &err);
+    free(secret_base32);
+    if (lpszTOTP == NULL)
+    {
+        return CRYPT_TOTP_FAILED;
+    }
+
+    memcpy(ucPasswdBuf, lpszTOTP, 8);
+    free(lpszTOTP);
+    memcpy(ucPasswdBuf + 8, ucPasswd, 24);
+
+    iKeysize = mcrypt_enc_get_key_size(td);
+    printf("iKeysize: %d\n", iKeysize);
+    if (iKeysize < 32)
+    {
+        printf("iKeysize: %d\n", iKeysize);
+        return CRYPT_KEYSIZE_INVALID;
+    }
+
+    iRes = mcrypt_generic_init(td, ucPasswdBuf, iKeysize, NULL);
+    printf("mcrypt_generic_init iRes: %d\n", iRes);
+
+    iRes = mcrypt_generic(td, lpucBuf, iCnt);
+    printf("mcrypt_generic iRes: %d\n", iRes);
+    mcrypt_generic_deinit(td);
+
+    if (iRes != 0)
+    {
+        return CRYPT_ENCRYPT_FAILED;
+    }
+    *lpuiBufLen = iCnt;
+
+    for (int i = 0; i < *lpuiBufLen; i++)
+    {
+        printf(" %02X", lpucBuf[i]);
+    }
+    putchar('\n');
+
+    printf("**********************************************************\n");
+    return CRYPT_SUCCESS;
+}
+
+crypt_error_t tryDataDecryptionTOTP(MCRYPT td, unsigned char ucPasswd[24], unsigned char *lpucBuf, unsigned int *lpuiBufLen, time_t now, unsigned int uiTOTPCnt, unsigned int uiPeriod)
+{
+    char *lpKeyArray;
+    cotp_error_t err;
+    baseencode_error_t base_err;
+    const char *K = "this is a secret";
+    char *secret_base32 = base32_encode((unsigned char *)K, strlen(K) + 1, &base_err);
+    char *lpszTOTP;
+    int iRes = 0;
+    int iBlocksize = 0;
+    int iKeysize = 0;
+    int iCnt;
+    unsigned int uiCRC32 = 0;
+    PPacket lpPacket = (PPacket)lpucBuf;
+
+    if (uiTOTPCnt % 2 == 0)
+    {
+        return CRYPT_INVALID_TOTP_COUNT;
+    }
+
+    iBlocksize = mcrypt_enc_get_block_size(td);
+    printf("iBlocksize: %d\n", iBlocksize);
+
+    iCnt = ((*lpuiBufLen - 1) / iBlocksize + 1) * iBlocksize;  // pad to block size
+    if (iCnt > sizeof(Packet))
+    {
+        return CRYPT_BLK_NOTFIT;
+    }
+
+    iKeysize = mcrypt_enc_get_key_size(td);
+    printf("iKeysize: %d\n", iKeysize);
+    if (iKeysize < 32)
+    {
+        printf("iKeysize: %d\n", iKeysize);
+        return CRYPT_KEYSIZE_INVALID;
+    }
+
+    lpKeyArray = calloc(uiTOTPCnt, iKeysize);
+
+    lpszTOTP = get_totp_at(secret_base32, now, 8, uiPeriod, SHA1, &err);
+    if (lpszTOTP == NULL)
+    {
+        free(secret_base32);
+        free(lpKeyArray);
+        return CRYPT_TOTP_FAILED;
+    }
+
+    memcpy(lpKeyArray, lpszTOTP, 8);
+    free(lpszTOTP);
+    memcpy(lpKeyArray + 8, ucPasswd, 24);
+
+    printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    for (int i = 0; i < 32; i++)
+    {
+        printf(" %02X", lpKeyArray[i]);
+    }
+    putchar('\n');
+    printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+
+    for (int i = 0; i < uiTOTPCnt / 2; i++)
+    {
+        lpszTOTP = get_totp_at(secret_base32, now - uiPeriod * (i + 1), 8, uiPeriod, SHA1, &err);
+        if (lpszTOTP == NULL)
+        {
+            free(secret_base32);
+            free(lpKeyArray);
+            return CRYPT_TOTP_FAILED;
+        }
+        printf("lpszTOTP: %s\n", lpszTOTP);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 1)), lpszTOTP, 8);
+        free(lpszTOTP);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 1)) + 8, ucPasswd, 24);
+        printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+        for (int j = 0; j < 32; j++)
+        {
+            printf(" %02X", (lpKeyArray + (iKeysize * (i * 2 + 1)))[j]);
+        }
+        putchar('\n');
+        printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+
+        lpszTOTP = get_totp_at(secret_base32, now + uiPeriod * (i + 1), 8, uiPeriod, SHA1, &err);
+        if (lpszTOTP == NULL)
+        {
+            free(secret_base32);
+            free(lpKeyArray);
+            return CRYPT_TOTP_FAILED;
+        }
+        printf("lpszTOTP: %s\n", lpszTOTP);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 2)), lpszTOTP, 8);
+        free(lpszTOTP);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 2)) + 8, ucPasswd, 24);
+        printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+        for (int j = 0; j < 32; j++)
+        {
+            printf(" %02X", (lpKeyArray + (iKeysize * (i * 2 + 2)))[j]);
+        }
+        putchar('\n');
+        printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    }
+    free(secret_base32);
+
+    for (int i = 0; i < uiTOTPCnt; i++)
+    {
+        iRes = mcrypt_generic_init(td, lpKeyArray + (iKeysize * i), iKeysize, NULL);
+        printf("mcrypt_generic_init iRes: %d\n", iRes);
+
+        iRes = mdecrypt_generic(td, lpucBuf, iCnt);
+        printf("mdecrypt_generic iRes: %d\n", iRes);
+        mcrypt_generic_deinit(td);
+
+        if (iRes != 0)
+        {
+            printf("error: iRes: %d\n", iRes);
+            free(lpKeyArray);
+            return CRYPT_DECRYPT_FAILED;
+        }
+        *lpuiBufLen = iCnt;
+
+        if (lpPacket->usLen > MAX_DATA_LEN)
+        {
+            printf("error: lpPacket->usLen: %d\n", lpPacket->usLen);
+            continue;
+        }
+
+        gcry_md_hash_buffer(GCRY_MD_CRC32, &uiCRC32, lpPacket->ucBuf, lpPacket->usLen);
+        printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+        printf("lpPacket->usLen: %d\n", lpPacket->usLen);
+        for (int i = 0; i < lpPacket->usLen; i++)
+        {
+            printf(" %02X", lpPacket->ucBuf[i]);
+        }
+        putchar('\n');
+        printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+        if (lpPacket->uiCRC32 != uiCRC32)
+        {
+            printf("error: lpPacket->uiCRC32 != uiCRC32\n");
+            printf("lpPacket->uiCRC32: %X\n", lpPacket->uiCRC32);
+            printf("uiCRC32: %X\n", uiCRC32);
+            printf("lpPacket->uiRand: %X\n", lpPacket->uiRand);
+            continue;
+        }
+
+        free(lpKeyArray);
+        return CRYPT_SUCCESS;
+    }
+
+    free(lpKeyArray);
+    return CRYPT_DECRYPT_FAILED;
+}
 
 union sockaddr_4or6
 {
@@ -66,37 +279,24 @@ union sockaddr_4or6
 int main(int argc, char **argv)
 {
     struct addrinfo hints;
-    struct addrinfo *result, *rp;
+    //struct addrinfo *result, *rp;
+    struct addrinfo *result;
 
     int dev, cnt, sock;
     unsigned int slen;
     unsigned char buf[1536];
-    union sockaddr_4or6 addr,from;
+    union sockaddr_4or6 addr, from;
 #ifndef __NetBSD__
     struct ifreq ifr;
 #endif
 
-    const char *lpszSeedKey = "this is a secret";
-    printf("key: %s\n", lpszSeedKey);
-
-    cotp_error_t err;
-    char *totp = get_totp (lpszSeedKey, 8, 30, SHA1, &err);
-    if (err != VALID)
-    {
-        printf("err: %d\n", err);
-        exit(1);
-    }
-
-    printf("totp: %s\n", totp);
-
     MCRYPT td;
-    int i;
-    char *key; 
-    char *block_buffer;
+    //int i;
+    unsigned char *key; 
     int blocksize = 0;
     int keysize = 32; /* 256 bits == 32 bytes */
-    char enc_state[1024];
-    int enc_state_size;
+    //char enc_state[1024];
+    //int enc_state_size;
     char* tun_device = "/dev/net/tun";
     char* dev_name = "tun%d";
     int tuntap_flag = IFF_TAP;
@@ -105,10 +305,12 @@ int main(int argc, char **argv)
     {
         tun_device = getenv("TUN_DEVICE");
     }
+
     if (getenv("DEV_NAME"))
     {
         dev_name = getenv("DEV_NAME");
     }
+
     if (getenv("IFF_TUN"))
     {
         tuntap_flag = IFF_TUN;
@@ -138,6 +340,7 @@ int main(int argc, char **argv)
         {
             algo = getenv("MCRYPT_ALGO");
         }
+
         if (getenv("MCRYPT_MODE"))
         {
             mode = getenv("MCRYPT_MODE");
@@ -151,18 +354,17 @@ int main(int argc, char **argv)
         }
         blocksize = mcrypt_enc_get_block_size(td);
         printf("blocksize: %d\n", blocksize);
-        //block_buffer = malloc(blocksize);
-
-        mcrypt_generic_init(td, key, keysize, NULL);
-
-        enc_state_size = sizeof enc_state;
-        mcrypt_enc_get_state(td, enc_state, &enc_state_size);
+    }
+    else
+    {
+        fprintf(stderr, "MCRYPT_KEYFILE is not set\n");
+        exit(1);
     }
 
     if (argc < 3)
     {
         fprintf(stderr,
-                "Usage: udptap_tunnel [-6] <localip> <localport> [<remotehost> <remoteport>]\n"
+                "Usage: udptap [-6] <localip> <localport> [<remotehost> <remoteport>]\n"
                 "    Environment variables:\n"
                 "    TUN_DEVICE  /dev/net/tun\n"
                 "    DEV_NAME    name of the device, default tun%%d\n"
@@ -198,11 +400,13 @@ int main(int argc, char **argv)
 
     if (argc == 5)
     {
+        // client mode
         autoaddress = 0;
         rhost = argv[3];
         rport = argv[4];
     }
 
+    printf("checkpoint 0.4\n");
     if ((dev = open(tun_device, O_RDWR)) < 0)
     {
         fprintf(stderr, "open(%s) failed: %s\n", tun_device, strerror(errno));
@@ -220,6 +424,8 @@ int main(int argc, char **argv)
         exit(3);
     }
 #endif
+
+    printf("checkpoint 0.8\n");
 
     if((sock = socket(ip_family, SOCK_DGRAM, 0)) == -1)
     {
@@ -257,11 +463,14 @@ int main(int argc, char **argv)
     }
 #endif //IPV6_V6ONLY
 
+    printf("checkpoint 1\n");
     if (bind(sock, (struct sockaddr *)&addr.a, slen))
     {
         fprintf(stderr, "bind() to port %s failed: %s\n", lport, strerror(errno));
         exit(5);
     }
+
+    printf("checkpoint 2\n");
 
     memset(&addr.a, 0, result->ai_addrlen);
     freeaddrinfo(result);
@@ -290,41 +499,62 @@ int main(int argc, char **argv)
     fcntl(dev, F_SETFL, O_NONBLOCK);
     int maxfd = (sock > dev) ? sock : dev;
 
+    //mcrypt_generic_init(td, key, keysize, NULL);
+
+    //enc_state_size = sizeof enc_state;
+    //mcrypt_enc_get_state(td, enc_state, &enc_state_size);
+
     for(;;)
     {
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(sock, &rfds);
         FD_SET(dev, &rfds);
+        printf("checkpoint 2.5\n");
         int ret = select(maxfd + 1, &rfds, NULL, NULL, NULL);
+
+        printf("checkpoint 4\n");
 
         if (ret < 0)
             continue;
 
         if (FD_ISSET(dev, &rfds))
         {
+            Packet stPacket;
+            unsigned int uiCRC32 = 0;
+            unsigned int uiBufLen;
+            unsigned int uiRand;
+            ssize_t siRet __attribute__((unused));
+            siRet = getrandom(&uiRand, sizeof(unsigned int), GRND_NONBLOCK);
+            time_t now;
+
             cnt = read(dev, (void*)&buf, 1518);
             if (blocksize)
             {
-                unsigned char crc32_hash[4] = {0};
+                //cnt = ((cnt - 1) / blocksize + 1) * blocksize; // pad to block size
+                //mcrypt_generic(td, buf, cnt);
 
-                gcry_md_hash_buffer(GCRY_MD_CRC32, crc32_hash, buf, cnt);
+                gcry_md_hash_buffer(GCRY_MD_CRC32, &uiCRC32, buf, cnt);
+                uiBufLen = cnt;
 
-                for (int i = 0; i < sizeof crc32_hash; i++)
-                {
-                    printf(" %02X", crc32_hash[i]);
-                }
-                putchar('\n');
+                stPacket.uiRand = uiRand;
+                stPacket.uiCRC32 = uiCRC32;
+                stPacket.usLen = cnt;
+                memcpy(stPacket.ucBuf, buf, cnt);
+                now = time(NULL);
 
-                cnt = ((cnt - 1) / blocksize + 1) * blocksize; // pad to block size
-                mcrypt_generic(td, buf, cnt);
-                mcrypt_enc_set_state(td, enc_state, enc_state_size);
+                crypt_error_t iRetEncrypt __attribute__((unused)) = encryptDataTOTP(td, key + 8, (unsigned char *)&stPacket, &uiBufLen, now, 10);
             }
-            sendto(sock, &buf, cnt, 0, &addr.a, slen);
+            printf("checkpoint sendto...\n");
+            sendto(sock, &stPacket, uiBufLen, 0, &addr.a, slen);
         }
 
         if (FD_ISSET(sock, &rfds))
         {
+            unsigned int uiBufLen;
+            time_t now;
+
+            printf("checkpoint recvfrom...\n");
             cnt = recvfrom(sock, &buf, 1536, 0, &from.a, &slen);
 
             int address_ok = 0;
@@ -358,11 +588,13 @@ int main(int argc, char **argv)
             {
                 if (blocksize)
                 {
-                    cnt = ((cnt - 1) / blocksize + 1) * blocksize; // pad to block size
-                    mdecrypt_generic(td, buf, cnt);
-                    mcrypt_enc_set_state(td, enc_state, enc_state_size);
+                    //cnt = ((cnt - 1) / blocksize + 1) * blocksize; // pad to block size
+                    //mdecrypt_generic(td, buf, cnt);
+                    //mcrypt_enc_set_state(td, enc_state, enc_state_size);
+                    now = time(NULL);
+                    crypt_error_t iRetDecrypt __attribute__((unused)) = tryDataDecryptionTOTP(td, key + 8, (unsigned char *)&buf, &uiBufLen, now, 3, 10);
                 }
-                write(dev, (void*)&buf, cnt);
+                write(dev, (void*)&buf, uiBufLen);
             }
         }
     }
