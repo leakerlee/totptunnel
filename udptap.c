@@ -52,14 +52,11 @@ typedef enum _crypt_error
     CRYPT_TOTP_FAILED = 7,
 } crypt_error_t;
 
-crypt_error_t encryptDataTOTP(MCRYPT td, unsigned char ucPasswd[24], unsigned char *lpucBuf, unsigned int *lpuiBufLen, time_t now, unsigned int uiPeriod)
+crypt_error_t encryptDataTOTP(MCRYPT td, unsigned char ucPasswd[22], unsigned char *lpucBuf, unsigned int *lpuiBufLen, time_t now, unsigned int uiPeriod, char *lpBase32SecretSeed)
 {
     printf("**********************************************************\n");
     int iRes = 0;
-    const char *K = "this is a secret";
     cotp_error_t err;
-    baseencode_error_t base_err;
-    char *secret_base32 = base32_encode((unsigned char *)K, strlen(K) + 1, &base_err);
     unsigned char ucPasswdBuf[32] = {0};
     int iKeysize = 0;
     int iBlocksize = 0;
@@ -72,21 +69,19 @@ crypt_error_t encryptDataTOTP(MCRYPT td, unsigned char ucPasswd[24], unsigned ch
     printf("encryptDataTOTP iCnt: %d\n", iCnt);
     if (iCnt > sizeof(Packet))
     {
-        free(secret_base32);
         return CRYPT_BLK_NOTFIT;
     }
 
     printf("encryptDataTOTP checkpoint 1\n");
-    lpszTOTP = get_totp_at(secret_base32, now, 8, uiPeriod, SHA1, &err);
-    free(secret_base32);
+    lpszTOTP = get_totek_at(lpBase32SecretSeed, now, uiPeriod, SHA1, &err);
     if (lpszTOTP == NULL)
     {
         return CRYPT_TOTP_FAILED;
     }
 
-    memcpy(ucPasswdBuf, lpszTOTP, 8);
+    memcpy(ucPasswdBuf, lpszTOTP, 10);
     free(lpszTOTP);
-    memcpy(ucPasswdBuf + 8, ucPasswd, 24);
+    memcpy(ucPasswdBuf + 10, ucPasswd, 22);
 
     iKeysize = mcrypt_enc_get_key_size(td);
     printf("iKeysize: %d\n", iKeysize);
@@ -119,13 +114,10 @@ crypt_error_t encryptDataTOTP(MCRYPT td, unsigned char ucPasswd[24], unsigned ch
     return CRYPT_SUCCESS;
 }
 
-crypt_error_t tryDataDecryptionTOTP(MCRYPT td, unsigned char ucPasswd[24], unsigned char *lpucBuf, unsigned int *lpuiBufLen, time_t now, unsigned int uiTOTPCnt, unsigned int uiPeriod)
+crypt_error_t tryDataDecryptionTOTP(MCRYPT td, unsigned char ucPasswd[22], unsigned char *lpucBuf, unsigned int *lpuiBufLen, time_t now, unsigned int uiTOTPCnt, unsigned int uiPeriod, char *lpBase32SecretSeed)
 {
     char *lpKeyArray;
     cotp_error_t err;
-    baseencode_error_t base_err;
-    const char *K = "this is a secret";
-    char *secret_base32 = base32_encode((unsigned char *)K, strlen(K) + 1, &base_err);
     char *lpszTOTP;
     int iRes = 0;
     int iBlocksize = 0;
@@ -158,67 +150,63 @@ crypt_error_t tryDataDecryptionTOTP(MCRYPT td, unsigned char ucPasswd[24], unsig
 
     lpKeyArray = calloc(uiTOTPCnt, iKeysize);
 
-    lpszTOTP = get_totp_at(secret_base32, now, 8, uiPeriod, SHA1, &err);
+    lpszTOTP = get_totek_at(lpBase32SecretSeed, now, uiPeriod, SHA1, &err);
     if (lpszTOTP == NULL)
     {
-        free(secret_base32);
         free(lpKeyArray);
         return CRYPT_TOTP_FAILED;
     }
 
-    memcpy(lpKeyArray, lpszTOTP, 8);
+    memcpy(lpKeyArray, lpszTOTP, 10);
     free(lpszTOTP);
-    memcpy(lpKeyArray + 8, ucPasswd, 24);
+    memcpy(lpKeyArray + 10, ucPasswd, 22);
 
     printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
     for (int i = 0; i < 32; i++)
     {
-        printf(" %02X", lpKeyArray[i]);
+        printf(" %02X", (unsigned char)lpKeyArray[i]);
     }
     putchar('\n');
     printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
 
     for (int i = 0; i < uiTOTPCnt / 2; i++)
     {
-        lpszTOTP = get_totp_at(secret_base32, now - uiPeriod * (i + 1), 8, uiPeriod, SHA1, &err);
+        lpszTOTP = get_totek_at(lpBase32SecretSeed, now - uiPeriod * (i + 1), uiPeriod, SHA1, &err);
         if (lpszTOTP == NULL)
         {
-            free(secret_base32);
             free(lpKeyArray);
             return CRYPT_TOTP_FAILED;
         }
-        printf("lpszTOTP: %s\n", lpszTOTP);
-        memcpy(lpKeyArray + (iKeysize * (i * 2 + 1)), lpszTOTP, 8);
+        //printf("lpszTOTP: %s\n", lpszTOTP);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 1)), lpszTOTP, 10);
         free(lpszTOTP);
-        memcpy(lpKeyArray + (iKeysize * (i * 2 + 1)) + 8, ucPasswd, 24);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 1)) + 10, ucPasswd, 22);
         printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
         for (int j = 0; j < 32; j++)
         {
-            printf(" %02X", (lpKeyArray + (iKeysize * (i * 2 + 1)))[j]);
+            printf(" %02X", (unsigned char)(lpKeyArray + (iKeysize * (i * 2 + 1)))[j]);
         }
         putchar('\n');
         printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
 
-        lpszTOTP = get_totp_at(secret_base32, now + uiPeriod * (i + 1), 8, uiPeriod, SHA1, &err);
+        lpszTOTP = get_totek_at(lpBase32SecretSeed, now + uiPeriod * (i + 1), uiPeriod, SHA1, &err);
         if (lpszTOTP == NULL)
         {
-            free(secret_base32);
             free(lpKeyArray);
             return CRYPT_TOTP_FAILED;
         }
-        printf("lpszTOTP: %s\n", lpszTOTP);
-        memcpy(lpKeyArray + (iKeysize * (i * 2 + 2)), lpszTOTP, 8);
+        //printf("lpszTOTP: %s\n", lpszTOTP);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 2)), lpszTOTP, 10);
         free(lpszTOTP);
-        memcpy(lpKeyArray + (iKeysize * (i * 2 + 2)) + 8, ucPasswd, 24);
+        memcpy(lpKeyArray + (iKeysize * (i * 2 + 2)) + 10, ucPasswd, 22);
         printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
         for (int j = 0; j < 32; j++)
         {
-            printf(" %02X", (lpKeyArray + (iKeysize * (i * 2 + 2)))[j]);
+            printf(" %02X", (unsigned char)(lpKeyArray + (iKeysize * (i * 2 + 2)))[j]);
         }
         putchar('\n');
         printf("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++\n");
     }
-    free(secret_base32);
 
     for (int i = 0; i < uiTOTPCnt; i++)
     {
@@ -300,6 +288,9 @@ int main(int argc, char **argv)
     char* tun_device = "/dev/net/tun";
     char* dev_name = "tun%d";
     int tuntap_flag = IFF_TAP;
+    const char *K = "this is a secret";
+    baseencode_error_t base_err;
+    char *lpBase32Secret = base32_encode((unsigned char *)K, strlen(K) + 1, &base_err);
 
     if (getenv("TUN_DEVICE"))
     {
@@ -543,7 +534,7 @@ int main(int argc, char **argv)
                 memcpy(stPacket.ucBuf, buf, cnt);
                 now = time(NULL);
 
-                crypt_error_t iRetEncrypt __attribute__((unused)) = encryptDataTOTP(td, key + 8, (unsigned char *)&stPacket, &uiBufLen, now, 10);
+                crypt_error_t iRetEncrypt __attribute__((unused)) = encryptDataTOTP(td, key + 10, (unsigned char *)&stPacket, &uiBufLen, now, 10, lpBase32Secret);
             }
             printf("checkpoint sendto...\n");
             sendto(sock, &stPacket, uiBufLen, 0, &addr.a, slen);
@@ -592,13 +583,14 @@ int main(int argc, char **argv)
                     //mdecrypt_generic(td, buf, cnt);
                     //mcrypt_enc_set_state(td, enc_state, enc_state_size);
                     now = time(NULL);
-                    crypt_error_t iRetDecrypt __attribute__((unused)) = tryDataDecryptionTOTP(td, key + 8, (unsigned char *)&buf, &uiBufLen, now, 3, 10);
+                    crypt_error_t iRetDecrypt __attribute__((unused)) = tryDataDecryptionTOTP(td, key + 10, (unsigned char *)&buf, &uiBufLen, now, 3, 10, lpBase32Secret);
                 }
                 write(dev, (void*)&buf, uiBufLen);
             }
         }
     }
 
+    free(lpBase32Secret);
     if (blocksize)
     {
         mcrypt_generic_deinit(td);
