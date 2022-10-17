@@ -135,6 +135,8 @@ crypt_error_t tryDataDecryptionTOTP(MCRYPT td, unsigned char ucPasswd[22], unsig
     printf("iBlocksize: %d\n", iBlocksize);
 
     iCnt = ((*lpuiBufLen - 1) / iBlocksize + 1) * iBlocksize;  // pad to block size
+    printf("iCnt: %d\n", iCnt);
+    printf("sizeof(Packet): %lu\n", sizeof(Packet));
     if (iCnt > sizeof(Packet))
     {
         return CRYPT_BLK_NOTFIT;
@@ -535,6 +537,8 @@ int main(int argc, char **argv)
                 now = time(NULL);
 
                 crypt_error_t iRetEncrypt __attribute__((unused)) = encryptDataTOTP(td, key + 10, (unsigned char *)&stPacket, &uiBufLen, now, 10, lpBase32Secret);
+                printf("encryptDataTOTP iRetEncrypt: %d\n", iRetEncrypt);
+                printf("encryptDataTOTP return uiBufLen: %d\n", uiBufLen);
             }
             printf("checkpoint sendto...\n");
             sendto(sock, &stPacket, uiBufLen, 0, &addr.a, slen);
@@ -583,9 +587,19 @@ int main(int argc, char **argv)
                     //mdecrypt_generic(td, buf, cnt);
                     //mcrypt_enc_set_state(td, enc_state, enc_state_size);
                     now = time(NULL);
+                    uiBufLen = cnt;
                     crypt_error_t iRetDecrypt __attribute__((unused)) = tryDataDecryptionTOTP(td, key + 10, (unsigned char *)&buf, &uiBufLen, now, 3, 10, lpBase32Secret);
+                    printf("tryDataDecryptionTOTP iRetDecrypt: %d\n", iRetDecrypt);
+                    printf("tryDataDecryptionTOTP return uiBufLen: %d\n", uiBufLen);
+                    PPacket lpPacket = (PPacket)buf;
+                    printf("lpPacket->usLen: %d\n", lpPacket->usLen);
                 }
-                write(dev, (void*)&buf, uiBufLen);
+                PPacket lpPacket = (PPacket)buf;
+                ssize_t iWriteRet = write(dev, &lpPacket->ucBuf, lpPacket->usLen);
+                printf("&lpPacket->ucBuf - &lpPacket->usLen: %ld\n", (void *)&lpPacket->ucBuf - (void *)&lpPacket->usLen);
+                printf("&lpPacket->ucBuf - &lpPacket->uiRand: %ld\n", (void *)&lpPacket->ucBuf - (void *)&lpPacket->uiRand);
+                printf("iWriteRet: %ld\n", iWriteRet);
+                printf("errno: %s\n", strerror(errno));
             }
         }
     }
