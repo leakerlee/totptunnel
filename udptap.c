@@ -385,7 +385,7 @@ int main(int argc, char **argv)
         slen = sizeof(struct sockaddr_in);
     }
 
-    int autoaddress = 1;
+    int autoaddress = 1;  // server mode is 1
     char* laddr = argv[1];
     char* lport = argv[2];
     char* rhost = NULL;
@@ -393,7 +393,7 @@ int main(int argc, char **argv)
 
     if (argc == 5)
     {
-        // client mode
+        // client mode is 0
         autoaddress = 0;
         rhost = argv[3];
         rport = argv[4];
@@ -470,6 +470,7 @@ int main(int argc, char **argv)
 
     if (!autoaddress)
     {
+        // client mode
         if (getaddrinfo(rhost, rport, &hints, &result))
         {
             perror("getaddrinfo for remote address");
@@ -481,7 +482,7 @@ int main(int argc, char **argv)
         }
         if (!result)
         {
-            fprintf(stderr, "getaddrinfo for remote returned no addresses\n");        
+            fprintf(stderr, "getaddrinfo for remote returned no addresses\n");
             exit(6);
         }
         memcpy(&addr.a, result->ai_addr, result->ai_addrlen);
@@ -528,7 +529,7 @@ int main(int argc, char **argv)
                 //mcrypt_generic(td, buf, cnt);
 
                 gcry_md_hash_buffer(GCRY_MD_CRC32, &uiCRC32, buf, cnt);
-                uiBufLen = cnt;
+                uiBufLen = cnt + offsetof(Packet, ucBuf);
 
                 stPacket.uiRand = uiRand;
                 stPacket.uiCRC32 = uiCRC32;
@@ -556,13 +557,16 @@ int main(int argc, char **argv)
 
             if (!autoaddress)
             {
+                // client mode
                 if (ip_family == AF_INET)
                 {
+                    printf("ip_family: %d\n", ip_family);
                     if ((from.a4.sin_addr.s_addr == addr.a4.sin_addr.s_addr) && (from.a4.sin_port == addr.a4.sin_port))
                     {
                         address_ok = 1;
                     }
                 } else {
+                    printf("ip_family: %d\n", ip_family);
                     if ((!memcmp(
                                     from.a6.sin6_addr.s6_addr,
                                     addr.a6.sin6_addr.s6_addr,
@@ -575,6 +579,7 @@ int main(int argc, char **argv)
             }
             else
             {
+                // server mode
                 memcpy(&addr.a, &from.a, slen);
                 address_ok = 1;
             }
