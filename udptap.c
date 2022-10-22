@@ -529,12 +529,12 @@ int main(int argc, char **argv)
                 //mcrypt_generic(td, buf, cnt);
 
                 gcry_md_hash_buffer(GCRY_MD_CRC32, &uiCRC32, buf, cnt);
-                uiBufLen = cnt + offsetof(Packet, ucBuf);
 
                 stPacket.uiRand = uiRand;
                 stPacket.uiCRC32 = uiCRC32;
                 stPacket.usLen = cnt;
                 memcpy(stPacket.ucBuf, buf, cnt);
+                uiBufLen = cnt + offsetof(Packet, ucBuf);
                 now = time(NULL);
 
                 crypt_error_t iRetEncrypt __attribute__((unused)) = encryptDataTOTP(td, key + 10, (unsigned char *)&stPacket, &uiBufLen, now, 10, lpBase32Secret);
